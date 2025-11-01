@@ -4,401 +4,373 @@ import json
 from datetime import datetime
 
 class LSEHostingAPITester:
-    def __init__(self, base_url="https://hostedlse-free.preview.emergentagent.com/api"):
+    def __init__(self, base_url="https://lsehosting-free-1.preview.emergentagent.com"):
         self.base_url = base_url
+        self.api_url = f"{base_url}/api"
         self.admin_token = None
         self.user_token = None
-        self.test_user_id = None
-        self.test_product_id = None
+        self.test_user_data = None
         self.tests_run = 0
         self.tests_passed = 0
         self.failed_tests = []
 
-    def run_test(self, name, method, endpoint, expected_status, data=None, token=None):
-        """Run a single API test"""
-        url = f"{self.base_url}/{endpoint}"
-        headers = {'Content-Type': 'application/json'}
-        if token:
-            headers['Authorization'] = f'Bearer {token}'
-
+    def log_test(self, name, success, details=""):
+        """Log test results"""
         self.tests_run += 1
-        print(f"\n🔍 Testing {name}...")
-        
+        if success:
+            self.tests_passed += 1
+            print(f"✅ {name} - PASSED")
+        else:
+            print(f"❌ {name} - FAILED: {details}")
+            self.failed_tests.append({"test": name, "error": details})
+
+    def test_config_endpoint(self):
+        """Test public config endpoint"""
         try:
-            if method == 'GET':
-                response = requests.get(url, headers=headers)
-            elif method == 'POST':
-                response = requests.post(url, json=data, headers=headers)
-            elif method == 'PUT':
-                response = requests.put(url, json=data, headers=headers)
-            elif method == 'DELETE':
-                response = requests.delete(url, headers=headers)
-
-            success = response.status_code == expected_status
+            response = requests.get(f"{self.api_url}/config")
+            success = response.status_code == 200
             if success:
-                self.tests_passed += 1
-                print(f"✅ Passed - Status: {response.status_code}")
-                try:
-                    return True, response.json() if response.text else {}
-                except:
-                    return True, {}
+                config = response.json()
+                expected_keys = ["credits_per_interval", "interval_seconds"]
+                success = all(key in config for key in expected_keys)
+                details = f"Config: {config}" if success else "Missing required config keys"
             else:
-                print(f"❌ Failed - Expected {expected_status}, got {response.status_code}")
-                print(f"   Response: {response.text}")
-                self.failed_tests.append({
-                    "test": name,
-                    "expected": expected_status,
-                    "actual": response.status_code,
-                    "response": response.text
-                })
-                return False, {}
-
+                details = f"Status: {response.status_code}"
+            
+            self.log_test("Config Endpoint", success, details)
+            return success, response.json() if success else {}
         except Exception as e:
-            print(f"❌ Failed - Error: {str(e)}")
-            self.failed_tests.append({
-                "test": name,
-                "error": str(e)
-            })
+            self.log_test("Config Endpoint", False, str(e))
             return False, {}
 
     def test_admin_login(self):
         """Test admin login with default credentials"""
-        success, response = self.run_test(
-            "Admin Login",
-            "POST",
-            "auth/login",
-            200,
-            data={"username": "admin", "password": "admin123"}
-        )
-        if success and 'token' in response:
-            self.admin_token = response['token']
-            print(f"   Admin token obtained: {self.admin_token[:20]}...")
-            return True
-        return False
+        try:
+            login_data = {
+                "usuario": "admin",
+                "password": "admin123"
+            }
+            response = requests.post(f"{self.api_url}/auth/login", json=login_data)
+            success = response.status_code == 200
+            
+            if success:
+                data = response.json()
+                required_keys = ["access_token", "token_type", "user"]
+                success = all(key in data for key in required_keys)
+                if success:
+                    self.admin_token = data["access_token"]
+                    success = data["user"].get("is_admin", False)
+                    details = "Admin login successful" if success else "User is not admin"
+                else:
+                    details = "Missing required response keys"
+            else:
+                details = f"Status: {response.status_code}, Response: {response.text}"
+            
+            self.log_test("Admin Login", success, details)
+            return success
+        except Exception as e:
+            self.log_test("Admin Login", False, str(e))
+            return False
 
     def test_user_registration(self):
         """Test user registration"""
-        timestamp = datetime.now().strftime('%H%M%S')
-        test_user_data = {
-            "nombre": "Test",
-            "apellidos": "User",
-            "email": f"test{timestamp}@example.com",
-            "username": f"testuser{timestamp}",
-            "password": "testpass123"
-        }
-        
-        success, response = self.run_test(
-            "User Registration",
-            "POST",
-            "auth/register",
-            200,
-            data=test_user_data
-        )
-        if success and 'token' in response:
-            self.user_token = response['token']
-            self.test_user_id = response['user']['id']
-            print(f"   User token obtained: {self.user_token[:20]}...")
-            print(f"   User ID: {self.test_user_id}")
-            return True
-        return False
+        try:
+            timestamp = datetime.now().strftime("%H%M%S")
+            self.test_user_data = {
+                "nombre": f"Test User {timestamp}",
+                "usuario": f"testuser{timestamp}",
+                "email": f"test{timestamp}@example.com",
+                "password": "testpass123"
+            }
+            
+            response = requests.post(f"{self.api_url}/auth/register", json=self.test_user_data)
+            success = response.status_code == 200
+            
+            if success:
+                data = response.json()
+                required_keys = ["access_token", "token_type", "user"]
+                success = all(key in data for key in required_keys)
+                if success:
+                    self.user_token = data["access_token"]
+                    user = data["user"]
+                    success = (user["usuario"] == self.test_user_data["usuario"] and 
+                             user["email"] == self.test_user_data["email"] and
+                             user["credits"] == 0 and
+                             not user["is_admin"])
+                    details = "Registration successful" if success else "User data mismatch"
+                else:
+                    details = "Missing required response keys"
+            else:
+                details = f"Status: {response.status_code}, Response: {response.text}"
+            
+            self.log_test("User Registration", success, details)
+            return success
+        except Exception as e:
+            self.log_test("User Registration", False, str(e))
+            return False
 
     def test_user_login(self):
-        """Test user login with created credentials"""
-        timestamp = datetime.now().strftime('%H%M%S')
-        success, response = self.run_test(
-            "User Login",
-            "POST",
-            "auth/login",
-            200,
-            data={"username": f"testuser{timestamp}", "password": "testpass123"}
-        )
-        return success
+        """Test user login with registered credentials"""
+        if not self.test_user_data:
+            self.log_test("User Login", False, "No test user data available")
+            return False
+            
+        try:
+            login_data = {
+                "usuario": self.test_user_data["usuario"],
+                "password": self.test_user_data["password"]
+            }
+            response = requests.post(f"{self.api_url}/auth/login", json=login_data)
+            success = response.status_code == 200
+            
+            if success:
+                data = response.json()
+                success = "access_token" in data and "user" in data
+                details = "Login successful" if success else "Missing token or user data"
+            else:
+                details = f"Status: {response.status_code}, Response: {response.text}"
+            
+            self.log_test("User Login", success, details)
+            return success
+        except Exception as e:
+            self.log_test("User Login", False, str(e))
+            return False
 
-    def test_auth_me(self):
-        """Test getting current user info"""
-        success, response = self.run_test(
-            "Get Current User",
-            "GET",
-            "auth/me",
-            200,
-            token=self.user_token
-        )
-        return success
+    def test_auth_me_endpoint(self):
+        """Test /auth/me endpoint with user token"""
+        if not self.user_token:
+            self.log_test("Auth Me Endpoint", False, "No user token available")
+            return False
+            
+        try:
+            headers = {"Authorization": f"Bearer {self.user_token}"}
+            response = requests.get(f"{self.api_url}/auth/me", headers=headers)
+            success = response.status_code == 200
+            
+            if success:
+                user = response.json()
+                success = (user["usuario"] == self.test_user_data["usuario"] and
+                          "password" not in user)
+                details = "User data retrieved successfully" if success else "User data mismatch or password exposed"
+            else:
+                details = f"Status: {response.status_code}"
+            
+            self.log_test("Auth Me Endpoint", success, details)
+            return success
+        except Exception as e:
+            self.log_test("Auth Me Endpoint", False, str(e))
+            return False
 
-    def test_get_user_credits(self):
-        """Test getting user credits"""
-        success, response = self.run_test(
-            "Get User Credits",
-            "GET",
-            "user/credits",
-            200,
-            token=self.user_token
-        )
-        return success
+    def test_claim_credits(self):
+        """Test credit claiming functionality"""
+        if not self.user_token:
+            self.log_test("Claim Credits", False, "No user token available")
+            return False
+            
+        try:
+            headers = {"Authorization": f"Bearer {self.user_token}"}
+            claim_data = {"intervals": 2}
+            response = requests.post(f"{self.api_url}/credits/claim", json=claim_data, headers=headers)
+            success = response.status_code == 200
+            
+            if success:
+                data = response.json()
+                required_keys = ["success", "credits_added", "total_credits"]
+                success = all(key in data for key in required_keys)
+                if success:
+                    success = data["success"] and data["credits_added"] > 0
+                    details = f"Credits claimed: {data['credits_added']}, Total: {data['total_credits']}"
+                else:
+                    details = "Missing required response keys"
+            else:
+                details = f"Status: {response.status_code}"
+            
+            self.log_test("Claim Credits", success, details)
+            return success
+        except Exception as e:
+            self.log_test("Claim Credits", False, str(e))
+            return False
 
-    def test_earn_credits(self):
-        """Test earning credits"""
-        success, response = self.run_test(
-            "Earn Credits",
-            "POST",
-            "user/earn-credits",
-            200,
-            token=self.user_token
-        )
-        return success
-
-    def test_credit_history(self):
-        """Test getting credit history"""
-        success, response = self.run_test(
-            "Get Credit History",
-            "GET",
-            "user/credit-history",
-            200,
-            token=self.user_token
-        )
-        return success
-
-    def test_shop_products(self):
-        """Test getting shop products"""
-        success, response = self.run_test(
-            "Get Shop Products",
-            "GET",
-            "shop/products",
-            200,
-            token=self.user_token
-        )
-        return success
+    def test_notifications_endpoint(self):
+        """Test notifications endpoint"""
+        if not self.user_token:
+            self.log_test("Notifications Endpoint", False, "No user token available")
+            return False
+            
+        try:
+            headers = {"Authorization": f"Bearer {self.user_token}"}
+            response = requests.get(f"{self.api_url}/notifications", headers=headers)
+            success = response.status_code == 200
+            
+            if success:
+                notifications = response.json()
+                success = isinstance(notifications, list)
+                details = f"Retrieved {len(notifications)} notifications" if success else "Invalid response format"
+            else:
+                details = f"Status: {response.status_code}"
+            
+            self.log_test("Notifications Endpoint", success, details)
+            return success
+        except Exception as e:
+            self.log_test("Notifications Endpoint", False, str(e))
+            return False
 
     def test_admin_get_users(self):
-        """Test admin getting all users"""
-        success, response = self.run_test(
-            "Admin Get Users",
-            "GET",
-            "admin/users",
-            200,
-            token=self.admin_token
-        )
-        return success
+        """Test admin endpoint to get all users"""
+        if not self.admin_token:
+            self.log_test("Admin Get Users", False, "No admin token available")
+            return False
+            
+        try:
+            headers = {"Authorization": f"Bearer {self.admin_token}"}
+            response = requests.get(f"{self.api_url}/admin/users", headers=headers)
+            success = response.status_code == 200
+            
+            if success:
+                users = response.json()
+                success = isinstance(users, list) and len(users) > 0
+                if success:
+                    # Check if admin user exists
+                    admin_exists = any(user.get("usuario") == "admin" for user in users)
+                    success = admin_exists
+                    details = f"Retrieved {len(users)} users, admin exists: {admin_exists}"
+                else:
+                    details = "No users found or invalid format"
+            else:
+                details = f"Status: {response.status_code}"
+            
+            self.log_test("Admin Get Users", success, details)
+            return success
+        except Exception as e:
+            self.log_test("Admin Get Users", False, str(e))
+            return False
 
     def test_admin_add_credits(self):
-        """Test admin adding credits to user"""
-        if not self.test_user_id:
-            print("❌ No test user ID available")
+        """Test admin functionality to add credits"""
+        if not self.admin_token or not self.test_user_data:
+            self.log_test("Admin Add Credits", False, "Missing admin token or test user")
             return False
             
-        success, response = self.run_test(
-            "Admin Add Credits",
-            "POST",
-            "admin/add-credits",
-            200,
-            data={
-                "user_id": self.test_user_id,
-                "amount": 10,
+        try:
+            headers = {"Authorization": f"Bearer {self.admin_token}"}
+            credit_data = {
+                "usuario": self.test_user_data["usuario"],
+                "credits": 100,
                 "reason": "Test credit addition"
-            },
-            token=self.admin_token
-        )
-        return success
+            }
+            response = requests.post(f"{self.api_url}/admin/credits/add", json=credit_data, headers=headers)
+            success = response.status_code == 200
+            
+            if success:
+                data = response.json()
+                success = data.get("success", False) and "new_balance" in data
+                details = f"Credits added, new balance: {data.get('new_balance', 'unknown')}" if success else "Invalid response"
+            else:
+                details = f"Status: {response.status_code}"
+            
+            self.log_test("Admin Add Credits", success, details)
+            return success
+        except Exception as e:
+            self.log_test("Admin Add Credits", False, str(e))
+            return False
 
     def test_admin_remove_credits(self):
-        """Test admin removing credits from user"""
-        if not self.test_user_id:
-            print("❌ No test user ID available")
+        """Test admin functionality to remove credits"""
+        if not self.admin_token or not self.test_user_data:
+            self.log_test("Admin Remove Credits", False, "Missing admin token or test user")
             return False
             
-        success, response = self.run_test(
-            "Admin Remove Credits",
-            "POST",
-            "admin/remove-credits",
-            200,
-            data={
-                "user_id": self.test_user_id,
-                "amount": 5,
+        try:
+            headers = {"Authorization": f"Bearer {self.admin_token}"}
+            credit_data = {
+                "usuario": self.test_user_data["usuario"],
+                "credits": 50,
                 "reason": "Test credit removal"
-            },
-            token=self.admin_token
-        )
-        return success
+            }
+            response = requests.post(f"{self.api_url}/admin/credits/remove", json=credit_data, headers=headers)
+            success = response.status_code == 200
+            
+            if success:
+                data = response.json()
+                success = data.get("success", False) and "new_balance" in data
+                details = f"Credits removed, new balance: {data.get('new_balance', 'unknown')}" if success else "Invalid response"
+            else:
+                details = f"Status: {response.status_code}"
+            
+            self.log_test("Admin Remove Credits", success, details)
+            return success
+        except Exception as e:
+            self.log_test("Admin Remove Credits", False, str(e))
+            return False
 
-    def test_admin_get_settings(self):
-        """Test admin getting settings"""
-        success, response = self.run_test(
-            "Admin Get Settings",
-            "GET",
-            "admin/settings",
-            200,
-            token=self.admin_token
-        )
-        return success
-
-    def test_admin_update_settings(self):
-        """Test admin updating settings"""
-        success, response = self.run_test(
-            "Admin Update Settings",
-            "PUT",
-            "admin/settings",
-            200,
-            data={
-                "credit_amount": 3,
-                "credit_interval": 300
-            },
-            token=self.admin_token
-        )
-        return success
-
-    def test_admin_create_product(self):
-        """Test admin creating a product"""
-        success, response = self.run_test(
-            "Admin Create Product",
-            "POST",
-            "admin/products",
-            200,
-            data={
-                "name": "Test VPS Server",
-                "description": "A test VPS server for testing purposes",
-                "price": 50,
-                "stock": 10
-            },
-            token=self.admin_token
-        )
-        if success and 'product' in response:
-            self.test_product_id = response['product']['id']
-            print(f"   Product ID: {self.test_product_id}")
-        return success
-
-    def test_admin_get_products(self):
-        """Test admin getting products"""
-        success, response = self.run_test(
-            "Admin Get Products",
-            "GET",
-            "admin/products",
-            200,
-            token=self.admin_token
-        )
-        return success
-
-    def test_admin_update_product(self):
-        """Test admin updating a product"""
-        if not self.test_product_id:
-            print("❌ No test product ID available")
+    def test_admin_update_config(self):
+        """Test admin functionality to update config"""
+        if not self.admin_token:
+            self.log_test("Admin Update Config", False, "No admin token available")
             return False
             
-        success, response = self.run_test(
-            "Admin Update Product",
-            "PUT",
-            f"admin/products/{self.test_product_id}",
-            200,
-            data={
-                "name": "Updated Test VPS Server",
-                "description": "An updated test VPS server",
-                "price": 60,
-                "stock": 15
-            },
-            token=self.admin_token
-        )
-        return success
-
-    def test_purchase_product(self):
-        """Test purchasing a product"""
-        if not self.test_product_id:
-            print("❌ No test product ID available")
-            return False
+        try:
+            headers = {"Authorization": f"Bearer {self.admin_token}"}
+            config_data = {
+                "credits_per_interval": 2,
+                "interval_seconds": 30
+            }
+            response = requests.post(f"{self.api_url}/admin/config", json=config_data, headers=headers)
+            success = response.status_code == 200
             
-        # First add enough credits to the user
-        self.run_test(
-            "Add Credits for Purchase",
-            "POST",
-            "admin/add-credits",
-            200,
-            data={
-                "user_id": self.test_user_id,
-                "amount": 100,
-                "reason": "Credits for testing purchase"
-            },
-            token=self.admin_token
-        )
+            if success:
+                data = response.json()
+                success = data.get("success", False) and "config" in data
+                details = f"Config updated: {data.get('config', {})}" if success else "Invalid response"
+            else:
+                details = f"Status: {response.status_code}"
+            
+            self.log_test("Admin Update Config", success, details)
+            return success
+        except Exception as e:
+            self.log_test("Admin Update Config", False, str(e))
+            return False
+
+    def run_all_tests(self):
+        """Run all backend API tests"""
+        print("🚀 Starting LSE Hosting Backend API Tests")
+        print(f"Testing against: {self.base_url}")
+        print("=" * 50)
         
-        success, response = self.run_test(
-            "Purchase Product",
-            "POST",
-            f"shop/purchase/{self.test_product_id}",
-            200,
-            token=self.user_token
-        )
-        return success
-
-    def test_admin_delete_product(self):
-        """Test admin deleting a product"""
-        if not self.test_product_id:
-            print("❌ No test product ID available")
-            return False
-            
-        success, response = self.run_test(
-            "Admin Delete Product",
-            "DELETE",
-            f"admin/products/{self.test_product_id}",
-            200,
-            token=self.admin_token
-        )
-        return success
+        # Test public endpoints
+        self.test_config_endpoint()
+        
+        # Test authentication
+        self.test_admin_login()
+        self.test_user_registration()
+        self.test_user_login()
+        self.test_auth_me_endpoint()
+        
+        # Test user functionality
+        self.test_claim_credits()
+        self.test_notifications_endpoint()
+        
+        # Test admin functionality
+        self.test_admin_get_users()
+        self.test_admin_add_credits()
+        self.test_admin_remove_credits()
+        self.test_admin_update_config()
+        
+        # Print summary
+        print("=" * 50)
+        print(f"📊 Test Results: {self.tests_passed}/{self.tests_run} passed")
+        
+        if self.failed_tests:
+            print("\n❌ Failed Tests:")
+            for test in self.failed_tests:
+                print(f"  - {test['test']}: {test['error']}")
+        
+        return self.tests_passed == self.tests_run
 
 def main():
-    print("🚀 Starting LSE Hosting API Tests...")
     tester = LSEHostingAPITester()
-
-    # Test sequence
-    tests = [
-        # Authentication tests
-        ("Admin Login", tester.test_admin_login),
-        ("User Registration", tester.test_user_registration),
-        ("Get Current User", tester.test_auth_me),
-        
-        # User functionality tests
-        ("Get User Credits", tester.test_get_user_credits),
-        ("Earn Credits", tester.test_earn_credits),
-        ("Get Credit History", tester.test_credit_history),
-        ("Get Shop Products", tester.test_shop_products),
-        
-        # Admin functionality tests
-        ("Admin Get Users", tester.test_admin_get_users),
-        ("Admin Add Credits", tester.test_admin_add_credits),
-        ("Admin Remove Credits", tester.test_admin_remove_credits),
-        ("Admin Get Settings", tester.test_admin_get_settings),
-        ("Admin Update Settings", tester.test_admin_update_settings),
-        
-        # Product management tests
-        ("Admin Create Product", tester.test_admin_create_product),
-        ("Admin Get Products", tester.test_admin_get_products),
-        ("Admin Update Product", tester.test_admin_update_product),
-        ("Purchase Product", tester.test_purchase_product),
-        ("Admin Delete Product", tester.test_admin_delete_product),
-    ]
-
-    # Run all tests
-    for test_name, test_func in tests:
-        try:
-            test_func()
-        except Exception as e:
-            print(f"❌ {test_name} failed with exception: {str(e)}")
-            tester.failed_tests.append({
-                "test": test_name,
-                "error": str(e)
-            })
-
-    # Print results
-    print(f"\n📊 Test Results:")
-    print(f"   Tests run: {tester.tests_run}")
-    print(f"   Tests passed: {tester.tests_passed}")
-    print(f"   Tests failed: {len(tester.failed_tests)}")
-    print(f"   Success rate: {(tester.tests_passed/tester.tests_run)*100:.1f}%")
-
-    if tester.failed_tests:
-        print(f"\n❌ Failed Tests:")
-        for failure in tester.failed_tests:
-            error_msg = failure.get('error', f"Expected {failure.get('expected')}, got {failure.get('actual')}")
-            print(f"   - {failure['test']}: {error_msg}")
-
-    return 0 if len(tester.failed_tests) == 0 else 1
+    success = tester.run_all_tests()
+    return 0 if success else 1
 
 if __name__ == "__main__":
     sys.exit(main())

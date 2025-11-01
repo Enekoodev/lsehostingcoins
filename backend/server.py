@@ -2,470 +2,370 @@ from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict, EmailStr
+from pydantic import BaseModel, EmailStr
 from typing import List, Optional
 import uuid
 from datetime import datetime, timezone, timedelta
+import json
 from passlib.context import CryptContext
-import jwt
+from jose import JWTError, jwt
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
-
-# Security
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-security = HTTPBearer()
+# JWT Configuration
 SECRET_KEY = os.environ.get('SECRET_KEY', 'lse-hosting-secret-key-change-in-production')
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_HOURS = 24
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 
-# Create the main app without a prefix
-app = FastAPI()
+# Password hashing
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+security = HTTPBearer()
 
-# Create a router with the /api prefix
-api_router = APIRouter(prefix="/api")
+# Data files
+DATA_DIR = ROOT_DIR / 'data'
+DATA_DIR.mkdir(exist_ok=True)
 
-# Models
-class UserRegister(BaseModel):
-    nombre: str
-    apellidos: str
-    email: EmailStr
-    username: str
-    password: str
+USERS_FILE = DATA_DIR / 'users.json'
+CONFIG_FILE = DATA_DIR / 'config.json'
+NOTIFICATIONS_FILE = DATA_DIR / 'notifications.json'
 
-class UserLogin(BaseModel):
-    username: str
-    password: str
+# Initialize data files
+if not USERS_FILE.exists():
+    # Create default admin user
+    default_users = {
+        "admin": {
+            "id": str(uuid.uuid4()),
+            "nombre": "Administrador",
+            "usuario": "admin",
+            "email": "admin@lsehosting.com",
+            "password": pwd_context.hash("admin123"),
+            "credits": 1000,
+            "is_admin": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+    }
+    USERS_FILE.write_text(json.dumps(default_users, indent=2))
 
-class User(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    nombre: str
-    apellidos: str
-    email: EmailStr
-    username: str
-    credits: int = 0
-    role: str = "user"  # user or admin
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    last_credit_earn: Optional[datetime] = None
+if not CONFIG_FILE.exists():
+    default_config = {
+        "credits_per_interval": 1,
+        "interval_seconds": 60
+    }
+    CONFIG_FILE.write_text(json.dumps(default_config, indent=2))
 
-class CreditHistory(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    user_id: str
-    amount: int
-    reason: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-class Settings(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = "global_settings"
-    credit_amount: int = 2
-    credit_interval: int = 300  # seconds
-    anti_adblock_enabled: bool = True
-
-class Product(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    name: str
-    description: str
-    price: int  # en créditos
-    stock: int
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-class Order(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    user_id: str
-    product_id: str
-    product_name: str
-    credits_spent: int
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-class AdminCreditAction(BaseModel):
-    user_id: str
-    amount: int
-    reason: str
-
-class ProductCreate(BaseModel):
-    name: str
-    description: str
-    price: int
-    stock: int
+if not NOTIFICATIONS_FILE.exists():
+    NOTIFICATIONS_FILE.write_text(json.dumps({}, indent=2))
 
 # Helper functions
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+def load_users():
+    return json.loads(USERS_FILE.read_text())
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
+def save_users(users):
+    USERS_FILE.write_text(json.dumps(users, indent=2))
+
+def load_config():
+    return json.loads(CONFIG_FILE.read_text())
+
+def save_config(config):
+    CONFIG_FILE.write_text(json.dumps(config, indent=2))
+
+def load_notifications():
+    return json.loads(NOTIFICATIONS_FILE.read_text())
+
+def save_notifications(notifications):
+    NOTIFICATIONS_FILE.write_text(json.dumps(notifications, indent=2))
+
+def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
-def create_access_token(data: dict) -> str:
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+def get_password_hash(password):
+    return pwd_context.hash(password)
 
-def decode_token(token: str) -> dict:
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def decode_token(token: str):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expirado")
-    except jwt.JWTError:
-        raise HTTPException(status_code=401, detail="Token inválido")
+    except JWTError:
+        return None
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
     payload = decode_token(token)
-    user_id = payload.get("user_id")
-    user = await db.users.find_one({"id": user_id}, {"_id": 0})
-    if not user:
-        raise HTTPException(status_code=401, detail="Usuario no encontrado")
-    return user
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials"
+        )
+    usuario = payload.get("sub")
+    if usuario is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials"
+        )
+    users = load_users()
+    if usuario not in users:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found"
+        )
+    return users[usuario]
 
-async def get_admin_user(current_user: dict = Depends(get_current_user)) -> dict:
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Acceso denegado: se requieren permisos de administrador")
+async def get_admin_user(current_user: dict = Depends(get_current_user)):
+    if not current_user.get("is_admin", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
     return current_user
 
-# Initialize database
-@app.on_event("startup")
-async def startup_db():
-    # Create default settings
-    settings_exist = await db.settings.find_one({"id": "global_settings"})
-    if not settings_exist:
-        settings = Settings()
-        doc = settings.model_dump()
-        await db.settings.insert_one(doc)
-    
-    # Create super admin user
-    admin_exist = await db.users.find_one({"username": "admin"})
-    if not admin_exist:
-        admin = User(
-            nombre="Admin",
-            apellidos="LSE Hosting",
-            email="admin@lsehosting.com",
-            username="admin",
-            credits=999999,
-            role="admin"
-        )
-        doc = admin.model_dump()
-        doc['created_at'] = doc['created_at'].isoformat()
-        doc['password'] = hash_password("admin123")
-        await db.users.insert_one(doc)
-        logger.info("Super admin creado - username: admin, password: admin123")
+# Models
+class RegisterRequest(BaseModel):
+    nombre: str
+    usuario: str
+    email: EmailStr
+    password: str
 
-# Auth Routes
-@api_router.post("/auth/register")
-async def register(user_data: UserRegister):
-    # Check if username or email already exists
-    existing_user = await db.users.find_one(
-        {"$or": [{"username": user_data.username}, {"email": user_data.email}]}
-    )
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Usuario o email ya existe")
+class LoginRequest(BaseModel):
+    usuario: str
+    password: str
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+    user: dict
+
+class UserResponse(BaseModel):
+    id: str
+    nombre: str
+    usuario: str
+    email: str
+    credits: int
+    is_admin: bool
+    created_at: str
+
+class UpdateCreditsRequest(BaseModel):
+    usuario: str
+    credits: int
+    reason: str
+
+class UpdateConfigRequest(BaseModel):
+    credits_per_interval: int
+    interval_seconds: int
+
+class ClaimCreditsRequest(BaseModel):
+    intervals: int
+
+# Create the main app
+app = FastAPI()
+api_router = APIRouter(prefix="/api")
+
+# Auth endpoints
+@api_router.post("/auth/register", response_model=TokenResponse)
+async def register(data: RegisterRequest):
+    users = load_users()
+    
+    # Check if user already exists
+    if data.usuario in users:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already registered"
+        )
+    
+    # Check if email already exists
+    for user in users.values():
+        if user["email"] == data.email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
+            )
     
     # Create new user
-    user = User(
-        nombre=user_data.nombre,
-        apellidos=user_data.apellidos,
-        email=user_data.email,
-        username=user_data.username
-    )
-    doc = user.model_dump()
-    doc['created_at'] = doc['created_at'].isoformat()
-    doc['password'] = hash_password(user_data.password)
+    user_id = str(uuid.uuid4())
+    new_user = {
+        "id": user_id,
+        "nombre": data.nombre,
+        "usuario": data.usuario,
+        "email": data.email,
+        "password": get_password_hash(data.password),
+        "credits": 0,
+        "is_admin": False,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
     
-    await db.users.insert_one(doc)
+    users[data.usuario] = new_user
+    save_users(users)
     
     # Create token
-    token = create_access_token({"user_id": user.id, "username": user.username})
+    access_token = create_access_token(data={"sub": data.usuario})
+    
+    # Remove password from response
+    user_response = {k: v for k, v in new_user.items() if k != "password"}
     
     return {
-        "message": "Usuario registrado exitosamente",
-        "token": token,
-        "user": {
-            "id": user.id,
-            "nombre": user.nombre,
-            "apellidos": user.apellidos,
-            "email": user.email,
-            "username": user.username,
-            "credits": user.credits,
-            "role": user.role
-        }
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": user_response
     }
 
-@api_router.post("/auth/login")
-async def login(credentials: UserLogin):
-    user = await db.users.find_one({"username": credentials.username}, {"_id": 0})
-    if not user or not verify_password(credentials.password, user['password']):
-        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+@api_router.post("/auth/login", response_model=TokenResponse)
+async def login(data: LoginRequest):
+    users = load_users()
     
-    token = create_access_token({"user_id": user['id'], "username": user['username']})
+    if data.usuario not in users:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password"
+        )
+    
+    user = users[data.usuario]
+    
+    if not verify_password(data.password, user["password"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password"
+        )
+    
+    # Create token
+    access_token = create_access_token(data={"sub": data.usuario})
+    
+    # Remove password from response
+    user_response = {k: v for k, v in user.items() if k != "password"}
     
     return {
-        "message": "Login exitoso",
-        "token": token,
-        "user": {
-            "id": user['id'],
-            "nombre": user['nombre'],
-            "apellidos": user['apellidos'],
-            "email": user['email'],
-            "username": user['username'],
-            "credits": user['credits'],
-            "role": user['role']
-        }
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": user_response
     }
 
-@api_router.get("/auth/me")
+@api_router.get("/auth/me", response_model=UserResponse)
 async def get_me(current_user: dict = Depends(get_current_user)):
-    return {
-        "id": current_user['id'],
-        "nombre": current_user['nombre'],
-        "apellidos": current_user['apellidos'],
-        "email": current_user['email'],
-        "username": current_user['username'],
-        "credits": current_user['credits'],
-        "role": current_user['role']
-    }
+    return {k: v for k, v in current_user.items() if k != "password"}
 
-# User Routes
-@api_router.get("/user/credits")
-async def get_user_credits(current_user: dict = Depends(get_current_user)):
-    return {"credits": current_user['credits']}
-
-@api_router.post("/user/earn-credits")
-async def earn_credits(current_user: dict = Depends(get_current_user)):
-    # Get settings
-    settings = await db.settings.find_one({"id": "global_settings"}, {"_id": 0})
-    if not settings:
-        raise HTTPException(status_code=500, detail="Configuración no encontrada")
+# User endpoints
+@api_router.post("/credits/claim")
+async def claim_credits(data: ClaimCreditsRequest, current_user: dict = Depends(get_current_user)):
+    config = load_config()
+    credits_to_add = data.intervals * config["credits_per_interval"]
     
-    credit_amount = settings['credit_amount']
-    credit_interval = settings['credit_interval']
-    
-    # Check if user can earn credits
-    last_earn = current_user.get('last_credit_earn')
-    if last_earn:
-        if isinstance(last_earn, str):
-            last_earn = datetime.fromisoformat(last_earn)
-        time_diff = (datetime.now(timezone.utc) - last_earn).total_seconds()
-        if time_diff < credit_interval:
-            remaining = int(credit_interval - time_diff)
-            return {
-                "success": False,
-                "message": f"Debes esperar {remaining} segundos más",
-                "remaining_seconds": remaining
-            }
-    
-    # Update user credits
-    new_credits = current_user['credits'] + credit_amount
-    await db.users.update_one(
-        {"id": current_user['id']},
-        {"$set": {
-            "credits": new_credits,
-            "last_credit_earn": datetime.now(timezone.utc).isoformat()
-        }}
-    )
-    
-    # Add to credit history
-    history = CreditHistory(
-        user_id=current_user['id'],
-        amount=credit_amount,
-        reason="Ganado automáticamente"
-    )
-    doc = history.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    await db.credit_history.insert_one(doc)
+    users = load_users()
+    users[current_user["usuario"]]["credits"] += credits_to_add
+    save_users(users)
     
     return {
         "success": True,
-        "message": f"¡Ganaste {credit_amount} créditos!",
-        "credits": new_credits,
-        "next_earn_in": credit_interval
+        "credits_added": credits_to_add,
+        "total_credits": users[current_user["usuario"]]["credits"]
     }
 
-@api_router.get("/user/credit-history")
-async def get_credit_history(current_user: dict = Depends(get_current_user)):
-    history = await db.credit_history.find(
-        {"user_id": current_user['id']},
-        {"_id": 0}
-    ).sort("timestamp", -1).to_list(100)
-    
-    for item in history:
-        if isinstance(item['timestamp'], str):
-            item['timestamp'] = datetime.fromisoformat(item['timestamp'])
-    
-    return history
+@api_router.get("/notifications")
+async def get_notifications(current_user: dict = Depends(get_current_user)):
+    notifications = load_notifications()
+    user_notifications = notifications.get(current_user["usuario"], [])
+    return user_notifications
 
-# Shop Routes
-@api_router.get("/shop/products")
-async def get_products(current_user: dict = Depends(get_current_user)):
-    products = await db.products.find({}, {"_id": 0}).to_list(1000)
-    return products
+@api_router.delete("/notifications/{notification_id}")
+async def delete_notification(notification_id: str, current_user: dict = Depends(get_current_user)):
+    notifications = load_notifications()
+    user_notifications = notifications.get(current_user["usuario"], [])
+    notifications[current_user["usuario"]] = [n for n in user_notifications if n["id"] != notification_id]
+    save_notifications(notifications)
+    return {"success": True}
 
-@api_router.post("/shop/purchase/{product_id}")
-async def purchase_product(product_id: str, current_user: dict = Depends(get_current_user)):
-    # Get product
-    product = await db.products.find_one({"id": product_id}, {"_id": 0})
-    if not product:
-        raise HTTPException(status_code=404, detail="Producto no encontrado")
-    
-    if product['stock'] <= 0:
-        raise HTTPException(status_code=400, detail="Producto agotado")
-    
-    if current_user['credits'] < product['price']:
-        raise HTTPException(status_code=400, detail="Créditos insuficientes")
-    
-    # Process purchase
-    new_credits = current_user['credits'] - product['price']
-    await db.users.update_one(
-        {"id": current_user['id']},
-        {"$set": {"credits": new_credits}}
-    )
-    
-    # Update product stock
-    await db.products.update_one(
-        {"id": product_id},
-        {"$set": {"stock": product['stock'] - 1}}
-    )
-    
-    # Create order
-    order = Order(
-        user_id=current_user['id'],
-        product_id=product_id,
-        product_name=product['name'],
-        credits_spent=product['price']
-    )
-    doc = order.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    await db.orders.insert_one(doc)
-    
-    # Add to credit history
-    history = CreditHistory(
-        user_id=current_user['id'],
-        amount=-product['price'],
-        reason=f"Compra: {product['name']}"
-    )
-    hdoc = history.model_dump()
-    hdoc['timestamp'] = hdoc['timestamp'].isoformat()
-    await db.credit_history.insert_one(hdoc)
-    
-    return {
-        "success": True,
-        "message": f"¡Compra exitosa de {product['name']}!",
-        "remaining_credits": new_credits,
-        "order_id": order.id
-    }
+@api_router.get("/config")
+async def get_config():
+    return load_config()
 
-# Admin Routes
-@api_router.get("/admin/users")
+# Admin endpoints
+@api_router.get("/admin/users", response_model=List[UserResponse])
 async def get_all_users(admin: dict = Depends(get_admin_user)):
-    users = await db.users.find({}, {"_id": 0, "password": 0}).to_list(1000)
-    return users
+    users = load_users()
+    return [{k: v for k, v in user.items() if k != "password"} for user in users.values()]
 
-@api_router.post("/admin/add-credits")
-async def admin_add_credits(action: AdminCreditAction, admin: dict = Depends(get_admin_user)):
-    user = await db.users.find_one({"id": action.user_id}, {"_id": 0})
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+@api_router.post("/admin/credits/add")
+async def add_credits(data: UpdateCreditsRequest, admin: dict = Depends(get_admin_user)):
+    users = load_users()
     
-    new_credits = user['credits'] + action.amount
-    await db.users.update_one(
-        {"id": action.user_id},
-        {"$set": {"credits": new_credits}}
-    )
+    if data.usuario not in users:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
     
-    # Add to credit history
-    history = CreditHistory(
-        user_id=action.user_id,
-        amount=action.amount,
-        reason=f"Añadido por admin: {action.reason}"
-    )
-    doc = history.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    await db.credit_history.insert_one(doc)
+    users[data.usuario]["credits"] += data.credits
+    save_users(users)
     
-    return {"success": True, "message": f"Se añadieron {action.amount} créditos", "new_credits": new_credits}
-
-@api_router.post("/admin/remove-credits")
-async def admin_remove_credits(action: AdminCreditAction, admin: dict = Depends(get_admin_user)):
-    user = await db.users.find_one({"id": action.user_id}, {"_id": 0})
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    # Add notification
+    notifications = load_notifications()
+    if data.usuario not in notifications:
+        notifications[data.usuario] = []
     
-    new_credits = max(0, user['credits'] - action.amount)
-    await db.users.update_one(
-        {"id": action.user_id},
-        {"$set": {"credits": new_credits}}
-    )
+    notifications[data.usuario].append({
+        "id": str(uuid.uuid4()),
+        "type": "credit_added",
+        "amount": data.credits,
+        "reason": data.reason,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    })
+    save_notifications(notifications)
     
-    # Add to credit history
-    history = CreditHistory(
-        user_id=action.user_id,
-        amount=-action.amount,
-        reason=f"Removido por admin: {action.reason}"
-    )
-    doc = history.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    await db.credit_history.insert_one(doc)
+    return {
+        "success": True,
+        "new_balance": users[data.usuario]["credits"]
+    }
+
+@api_router.post("/admin/credits/remove")
+async def remove_credits(data: UpdateCreditsRequest, admin: dict = Depends(get_admin_user)):
+    users = load_users()
     
-    return {"success": True, "message": f"Se removieron {action.amount} créditos", "new_credits": new_credits}
+    if data.usuario not in users:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    users[data.usuario]["credits"] = max(0, users[data.usuario]["credits"] - data.credits)
+    save_users(users)
+    
+    # Add notification
+    notifications = load_notifications()
+    if data.usuario not in notifications:
+        notifications[data.usuario] = []
+    
+    notifications[data.usuario].append({
+        "id": str(uuid.uuid4()),
+        "type": "credit_removed",
+        "amount": data.credits,
+        "reason": data.reason,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    })
+    save_notifications(notifications)
+    
+    return {
+        "success": True,
+        "new_balance": users[data.usuario]["credits"]
+    }
 
-@api_router.get("/admin/settings")
-async def get_settings(admin: dict = Depends(get_admin_user)):
-    settings = await db.settings.find_one({"id": "global_settings"}, {"_id": 0})
-    return settings
+@api_router.post("/admin/config")
+async def update_config(data: UpdateConfigRequest, admin: dict = Depends(get_admin_user)):
+    config = {
+        "credits_per_interval": data.credits_per_interval,
+        "interval_seconds": data.interval_seconds
+    }
+    save_config(config)
+    return {"success": True, "config": config}
 
-@api_router.put("/admin/settings")
-async def update_settings(settings_update: dict, admin: dict = Depends(get_admin_user)):
-    await db.settings.update_one(
-        {"id": "global_settings"},
-        {"$set": settings_update}
-    )
-    return {"success": True, "message": "Configuración actualizada"}
-
-@api_router.get("/admin/products")
-async def get_admin_products(admin: dict = Depends(get_admin_user)):
-    products = await db.products.find({}, {"_id": 0}).to_list(1000)
-    return products
-
-@api_router.post("/admin/products")
-async def create_product(product_data: ProductCreate, admin: dict = Depends(get_admin_user)):
-    product = Product(**product_data.model_dump())
-    doc = product.model_dump()
-    doc['created_at'] = doc['created_at'].isoformat()
-    await db.products.insert_one(doc)
-    return {"success": True, "message": "Producto creado", "product": product}
-
-@api_router.put("/admin/products/{product_id}")
-async def update_product(product_id: str, product_data: dict, admin: dict = Depends(get_admin_user)):
-    result = await db.products.update_one(
-        {"id": product_id},
-        {"$set": product_data}
-    )
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Producto no encontrado")
-    return {"success": True, "message": "Producto actualizado"}
-
-@api_router.delete("/admin/products/{product_id}")
-async def delete_product(product_id: str, admin: dict = Depends(get_admin_user)):
-    result = await db.products.delete_one({"id": product_id})
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Producto no encontrado")
-    return {"success": True, "message": "Producto eliminado"}
-
-# Include the router in the main app
+# Include router
 app.include_router(api_router)
 
 app.add_middleware(
@@ -476,13 +376,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()

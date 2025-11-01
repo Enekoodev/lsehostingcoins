@@ -1,0 +1,27 @@
+{
+  "testuser093149": [
+    {
+      "id": "2ed762de-52f3-43ee-ae20-48f2e9ac7f31",
+      "type": "credit_added",
+      "amount": 100,
+      "reason": "Test credit addition",
+      "timestamp": "2025-11-01T09:31:50.104322+00:00"
+    },
+    {
+      "id": "e2b80729-8538-4a88-b54c-101557efa9e9",
+      "type": "credit_removed",
+      "amount": 50,
+      "reason": "Test credit removal",
+      "timestamp": "2025-11-01T09:31:50.147078+00:00"
+    }
+  ],
+  "admin": [
+    {
+      "id": "9dd6cd45-9ac3-458a-b0f8-2c71ad99ede1",
+      "type": "credit_added",
+      "amount": 50,
+      "reason": "Test bonus",
+      "timestamp": "2025-11-01T09:32:30.830779+00:00"
+    }
+  ]
+}
